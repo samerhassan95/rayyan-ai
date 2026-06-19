@@ -1,0 +1,13 @@
+flask
+requests
+numpy
+pandas
+faiss-cpu
+sentence-transformers
+pypdf
+reportlab
+arabic-reshaper
+python-bidi
+google-genai
+openpyxl
+faiss-cpu
