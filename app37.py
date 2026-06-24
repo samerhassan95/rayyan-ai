@@ -4,7 +4,7 @@ import re
 import time
 import numpy as np
 import pandas as pd
-
+import random
 from pypdf import PdfReader
 from sentence_transformers import SentenceTransformer
 import faiss
@@ -46,7 +46,7 @@ pdfmetrics.registerFont(
 # ==================================
 # GEMINI
 # ==================================
-GEMINI_API_KEY = "AIzaSyAXFRcjpdgAYEWwYtcGZVoMdMTVchtanKA"
+GEMINI_API_KEY = "AQ.Ab8RN6L7OZLAwHlka__fcIUIFclDbRZ3r95yuObBZwrYLD-3Fw"
 if not GEMINI_API_KEY:
     raise Exception(
         "GEMINI_API_KEY not found"
@@ -166,11 +166,29 @@ def generate_questions(proposal_text, rag_context):
     prompt = f"""
 أنت خبير في تحليل RFPs والعروض الفنية.
 
+تخدمهم جداً:
+- لا تفكر كمستشار
+- لا تشرح
+- لا تحلل
+- لا تتكلم مع المستخدم
+- لا تستخدم أي جمل طبيعية أو مقدمات
+
+أنت تنتج بيانات خام فقط (RAW OUTPUT).
+
+
+
+الشروط:
+- كل عنصر يحتوي فقط على question
+- لا تكتب أي شيء خارج JSON
+- لا تكتب أي نص قبل أو بعد JSON
+- لا تستخدم أي شرح نهائياً
+- لا تبدأ بجمل مثل: "سأقوم" أو "فيما يلي""
+
 بيانات الشركة:
 {rag_context}
 
 بيانات المشروع:
-{proposal_text[:15000]}
+{proposal_text[:8000]}
 
 إطار الأسئلة المرجعي:
 
@@ -648,51 +666,26 @@ def build_rag_context(store, proposal_text):
 # ==================================
 # GEMINI CALL
 # ==================================
-def call_gemini(
-        prompt,
-        retries=3
-):
+def call_gemini(prompt, retries=8):
 
-    for attempt in range(
-            retries
-    ):
+    for attempt in range(retries):
 
         try:
-
-            response = (
-                client.models.generate_content(
-                    model="gemini-2.5-pro",
-                    contents=prompt,
-                    config={
-                        "temperature": 0.4,
-                        "top_p": 0.9,
-                        "max_output_tokens": 8192
-                    }
-                )
+            response = client.models.generate_content(
+                model="gemini-2.5-pro",
+                contents=prompt
             )
 
-            if (
-                response
-                and getattr(
-                    response,
-                    "text",
-                    None
-                )
-            ):
-
-                return (
-                    response.text
-                    .strip()
-                )
+            if response and response.text:
+                return response.text.strip()
 
         except Exception as e:
 
-            print(
-                f"Gemini Error ({attempt+1}) :",
-                e
-            )
+            wait = min(60, (2 ** attempt) + random.uniform(0, 2))
 
-            time.sleep(5)
+            print(f"Gemini failed attempt {attempt+1}, retry in {wait:.1f}s")
+
+            time.sleep(wait)
 
     return ""
 
@@ -717,6 +710,24 @@ def clean_response(
         "```",
         ""
     )
+
+    # Remove AI preamble opening paragraph
+    # e.g. "بالتأكيد، بصفتي مستشاراً استراتيجياً..."
+    preamble_triggers = [
+        "بالتأكيد",
+        "يسعدني",
+        "بكل سرور",
+        "بصفتي مستشار",
+        "سأقوم بصياغة",
+        "تم تصميم هذا القسم",
+    ]
+
+    paragraphs = text.strip().split("\n\n")
+    if paragraphs:
+        first = paragraphs[0].strip()
+        if any(trigger in first for trigger in preamble_triggers):
+            paragraphs = paragraphs[1:]
+        text = "\n\n".join(paragraphs)
 
     return text.strip()
 
@@ -759,6 +770,27 @@ def send_report_to_api(proposal_id, report, retries=3):
     return None
 
 
+def send_progress(proposal_id, step, pct):
+    BASE_URL = "https://demo.togaar.com/api"
+    AI_KEY = "togaar-ai-secret-2025"
+    try:
+        requests.post(
+            f"{BASE_URL}/ai/progress/{proposal_id}",
+            headers={
+                "X-AI-Key": AI_KEY,
+                "Content-Type": "application/json"
+            },
+            json={
+                "step": step,
+                "pct": pct
+            },
+            timeout=10
+        )
+        print(f"Sent progress: {step} ({pct}%)")
+    except Exception as e:
+        print(f"Progress update failed: {e}")
+
+
 # ==================================
 # SECTION GENERATOR
 # ==================================
@@ -766,15 +798,33 @@ def generate_section(
         section_name,
         proposal_text,
         rag_context,
-        reference_style=""
+        reference_style="",
+        user_prompt=""
 ):
 
     prompt = f"""
-أنت مستشار عالمي من مستوى McKinsey و BCG.
+أنت كاتب تقارير استشارية محترف.
+
+ممنوع استخدام أي جمل مثل:
+- سأقوم
+- سنقوم
+- بصفتي مستشار
+- فيما يلي
+- هذا القسم سيقدم
+
+ابدأ مباشرة بالمحتوى بدون مقدمات.
+
+اكتب بأسلوب شركات الاستشارات الكبرى (McKinsey / BCG) لكن بدون الإشارة لنفسك أو استخدام ضمير المتكلم.
 
 المطلوب كتابة قسم واحد فقط:
 
 {section_name}
+
+================================================
+
+تعليمات إلزامية من العميل (يجب الالتزام بها واعتبارها جزءاً من نطاق المشروع):
+
+{user_prompt}
 
 ================================================
 
@@ -786,7 +836,7 @@ def generate_section(
 
 معلومات المشروع:
 
-{proposal_text[:15000]}
+{proposal_text[:8000]}
 
 ================================================
 
@@ -1009,43 +1059,28 @@ def safe_generate_section(
         section_name,
         proposal_text,
         rag_context,
-        reference_style=""
+        reference_style="",
+        user_prompt=""
 ):
-
     try:
-
-        print(
-            f"\nGenerating: {section_name}"
-        )
+        print(f"\nGenerating: {section_name}")
 
         result = generate_section(
             section_name,
             proposal_text,
             rag_context,
-            reference_style
+            reference_style,
+            user_prompt
         )
 
         if not result:
-
-            return (
-                f"لم يتم توليد قسم "
-                f"{section_name}"
-            )
+            return f"لم يتم توليد قسم {section_name}"
 
         return result
 
     except Exception as e:
-
-        print(
-            f"Section Error ({section_name})",
-            e
-        )
-
-        return (
-            f"حدث خطأ أثناء إنشاء "
-            f"{section_name}"
-        )
-
+        print(f"Section Error ({section_name})", e)
+        return f"حدث خطأ أثناء إنشاء {section_name}"
 
 # ==================================
 # REPORT CREATOR
@@ -1053,7 +1088,9 @@ def safe_generate_section(
 def create_report(
         proposal_text,
         rag_context,
-        reference_style=""
+        reference_style="",
+        user_prompt="",
+        proposal_id=None
 ):
 
     report = {}
@@ -1071,12 +1108,16 @@ def create_report(
             f"{section}"
         )
 
+        if proposal_id:
+            send_progress(proposal_id, f"Writing section: {section}", 40 + int((current / total) * 45))
+
         raw = safe_generate_section(
             section,
             proposal_text,
             rag_context,
-            reference_style
-            )
+            reference_style,
+            user_prompt
+)
         report[section] = parse_section_to_structured(raw)
         
 
@@ -1725,20 +1766,28 @@ def run_pipeline(proposal_id):
     print("STARTING PIPELINE:", proposal_id)
     print("=========================\n")
 
+    send_progress(proposal_id, "Fetching proposal data", 10)
     base_path, company_path, proposal_path = prepare_id_folders(proposal_id)
 
     api_data = fetch_proposal_from_api(proposal_id)
+
+    user_prompt = (
+    api_data.get("proposalData", {})
+            .get("aiPrompt", "")
+)
 
     if not api_data:
         print("No API data found")
         return
 
+    send_progress(proposal_id, "Downloading documents", 20)
     download_api_documents(
         api_data,
         company_path,
         proposal_path
     )
 
+    send_progress(proposal_id, "Loading context", 30)
     store = VectorStore()
 
     load_company_documents(company_path, store)
@@ -1752,15 +1801,20 @@ def run_pipeline(proposal_id):
     latest_report = create_report(
         proposal_text,
         rag_context,
-        reference_style
-    )
+        reference_style,
+        user_prompt=user_prompt,
+        proposal_id=proposal_id
+)
 
     output_path = os.path.join(base_path, "output.json")
     
 
+    send_progress(proposal_id, "Generating questions", 90)
     questions = generate_questions(proposal_text, rag_context)
     latest_report["Questions"] = questions
     save_json(latest_report, output_path)
+    
+    send_progress(proposal_id, "Uploading report", 95)
     send_report_to_api(proposal_id, latest_report)
 
 
